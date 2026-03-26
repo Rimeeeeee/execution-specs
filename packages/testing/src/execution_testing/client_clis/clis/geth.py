@@ -159,18 +159,28 @@ class GethExceptionMapper(ExceptionMapper):
         # https://github.com/ethereum/execution-specs/blob/5ddb904fa7ba27daeff423e78466744c51e8cb6a/src/ethereum/forks/prague/requests.py#L51
         # BAL Exceptions: TODO - review once all clients completed.
         BlockException.INVALID_BAL_EXTRA_ACCOUNT: (
-            r"invalid block access list:"
+            r"invalid block access list:|"
+            r"mismatch between local/remote"
         ),
-        BlockException.INVALID_BAL_HASH: (r"invalid block access list:"),
+        BlockException.INVALID_BAL_HASH: (
+            r"invalid block access list:|"
+            r"mismatch between local/remote"
+        ),
         BlockException.INVALID_BAL_MISSING_ACCOUNT: (
             r"computed state diff contained mutated accounts "
-            r"which weren't reported in BAL"
+            r"which weren't reported in BAL|"
+            r"mismatch between local/remote"
         ),
         BlockException.INVALID_BLOCK_ACCESS_LIST: (
             r"difference between computed state diff and "
-            r"BAL entry for account|invalid block access list:"
+            r"BAL entry for account|invalid block access list:|"
+            r"mismatch between local/remote"
         ),
         BlockException.INCORRECT_BLOCK_FORMAT: (r"invalid block access list:"),
+        BlockException.BLOCK_ACCESS_LIST_GAS_LIMIT_EXCEEDED: (
+            r"block access list exceeds gas limit"
+        ),
+        BlockException.GAS_USED_OVERFLOW: (r"gas limit reached"),
     }
 
 
