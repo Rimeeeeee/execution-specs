@@ -60,7 +60,8 @@ class RethExceptionMapper(ExceptionMapper):
             r"max fee per blob gas \(\d+\)"
         ),
         TransactionException.INTRINSIC_GAS_TOO_LOW: (
-            r"call gas cost \(\d+\) exceeds the gas limit \(\d+\)"
+            r"call gas cost \(\d+\) exceeds the gas limit \(\d+\)|"
+            r"gas floor \(\d+\) exceeds the gas limit \(\d+\)"
         ),
         TransactionException.INTRINSIC_GAS_BELOW_FLOOR_GAS_COST: (
             r"gas floor \(\d+\) exceeds the gas limit \(\d+\)"
@@ -96,7 +97,6 @@ class RethExceptionMapper(ExceptionMapper):
         ),
         BlockException.INVALID_GASLIMIT: (
             r"child gas_limit \d+ max .* is .*|"
-            r"child gas_limit \d+ is below the max allowed decrease .*|"
             r"child gas limit \d+ is below the minimum allowed limit"
         ),
         BlockException.INVALID_BLOCK_TIMESTAMP_OLDER_THAN_PARENT: (
@@ -106,22 +106,21 @@ class RethExceptionMapper(ExceptionMapper):
         BlockException.INVALID_BLOCK_NUMBER: (
             r"block number \d+ does not match parent block number \d+"
         ),
-        BlockException.GAS_USED_OVERFLOW: (
-            r"transaction gas limit \w+ is more than blocks available gas \w+"
-        ),
         # BAL Exceptions: TODO - review once all clients completed.
         BlockException.INVALID_BAL_EXTRA_ACCOUNT: (
-            r"block access list hash mismatch"
+            r"Block BAL contains an account change "
+            r"that is not present in the computed BAL."
         ),
-        BlockException.INVALID_BAL_HASH: (r"block access list hash mismatch"),
+        BlockException.INVALID_BAL_HASH: (r"Block's access list is invalid."),
         BlockException.INVALID_BAL_MISSING_ACCOUNT: (
-            r"block access list hash mismatch"
+            r"Block BAL is missing an account change "
+            r"that is present in the computed BAL."
         ),
         BlockException.INVALID_BLOCK_ACCESS_LIST: (
-            r"block access list hash mismatch"
+            r"Block's access list is invalid."
         ),
         BlockException.INCORRECT_BLOCK_FORMAT: (
-            r"block access list hash mismatch"
+            r"Block's access list is invalid."
         ),
         # Reth does not validate the sizes or offsets of the deposit
         # contract logs. As a workaround we have set
@@ -141,4 +140,7 @@ class RethExceptionMapper(ExceptionMapper):
             r"failed to decode deposit requests from receipts|"
             r"mismatched block requests hash"
         ),
+        BlockException.BLOCK_ACCESS_LIST_GAS_LIMIT_EXCEEDED: (
+            r"block access list cost exceeds gas limit"
+        )
     }
