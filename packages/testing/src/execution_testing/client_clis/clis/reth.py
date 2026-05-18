@@ -76,7 +76,8 @@ class RethExceptionMapper(ExceptionMapper):
             r"blob transactions present in pre-cancun payload|empty blobs"
         ),
         TransactionException.GAS_ALLOWANCE_EXCEEDED: (
-            r"transaction gas limit \w+ is more than blocks available gas \w+"
+            r"transaction gas limit \w+ is more than blocks available gas \w+|"
+            r"caller gas limit exceeds the block gas limit"
         ),
         TransactionException.GAS_LIMIT_EXCEEDS_MAXIMUM: (
             r"transaction gas limit.*is greater than the cap"
@@ -117,7 +118,8 @@ class RethExceptionMapper(ExceptionMapper):
             r"BAL rejection: FinalHashMismatch"
         ),
         BlockException.INCORRECT_BLOCK_FORMAT: (
-            r"block access list hash mismatch"
+            r"block access list hash mismatch|"
+            r"BAL rejection: FinalHashMismatch"
         ),
         # Reth does not validate the sizes or offsets of the deposit
         # contract logs. As a workaround we have set
