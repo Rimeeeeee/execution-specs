@@ -9,7 +9,7 @@ from typing import List, Union
 
 import pytest
 
-from execution_testing.base_types import Address
+from execution_testing.base_types import Address, Bytes, Hash
 from execution_testing.test_types.block_access_list import (
     BalAccountChange,
     BalBalanceChange,
@@ -393,3 +393,65 @@ def test_bal_single_account_valid() -> None:
         ]
     )
     bal.validate_structure()  # Should not raise
+
+
+def test_bal_rlp_roundtrip_preserves_storage_root() -> None:
+    """Test EIP-8268 storage roots survive BAL RLP decode/encode."""
+    addr = Address(0xA)
+    storage_root = Hash(b"\x11" * 32)
+    original = BlockAccessList(
+        [
+            BalAccountChange(
+                address=addr,
+                balance_changes=[
+                    BalBalanceChange(block_access_index=1, post_balance=1),
+                ],
+                storage_root=storage_root,
+            )
+        ]
+    )
+
+    restored = BlockAccessList.from_rlp(original.rlp)
+
+    assert restored == original
+    assert isinstance(restored.root[0].storage_root, Hash)
+    assert restored.rlp == original.rlp
+
+
+def test_bal_rlp_roundtrip_preserves_empty_storage_root() -> None:
+    """Test EIP-8268 empty storage root marker survives BAL RLP."""
+    original = BlockAccessList(
+        [
+            BalAccountChange(
+                address=Address(0xA),
+                balance_changes=[
+                    BalBalanceChange(block_access_index=1, post_balance=1),
+                ],
+                storage_root=Bytes(),
+            )
+        ]
+    )
+
+    restored = BlockAccessList.from_rlp(original.rlp)
+
+    assert restored == original
+    assert isinstance(restored.root[0].storage_root, Bytes)
+    assert restored.root[0].storage_root == Bytes()
+    assert restored.rlp == original.rlp
+
+
+def test_bal_rlp_access_only_account_omits_storage_root() -> None:
+    """Test access-only BAL accounts keep the six-field layout."""
+    original = BlockAccessList(
+        [
+            BalAccountChange(
+                address=Address(0xA),
+                storage_reads=[1],
+            )
+        ]
+    )
+
+    restored = BlockAccessList.from_rlp(original.rlp)
+
+    assert restored.root[0].storage_root is None
+    assert restored.rlp == original.rlp
