@@ -2,10 +2,10 @@
 Account change classes for Block Access List.
 
 This module contains the core data structures representing changes to accounts
-in a block access list as defined in EIP-7928.
+in a block access list as defined in EIP-7928 and extended by EIP-8268.
 """
 
-from typing import ClassVar, List, Self, Union
+from typing import ClassVar, List, Optional, Self, Union
 
 from pydantic import Field, model_validator
 
@@ -13,9 +13,12 @@ from execution_testing.base_types import (
     Address,
     Bytes,
     CamelModel,
+    Hash,
     RLPSerializable,
     ZeroPaddedHexNumber,
 )
+
+StorageRoot = Bytes | Hash
 
 
 class BalNonceChange(CamelModel, RLPSerializable):
@@ -122,6 +125,14 @@ class BalAccountChange(CamelModel, RLPSerializable):
         default_factory=list,
         description="List of storage slots that were read",
     )
+    storage_root: Optional[StorageRoot] = Field(
+        default=None,
+        description=(
+            "Post-block storage trie root for state-changing account entries. "
+            "EIP-8268 encodes empty storage as the empty byte string and "
+            "non-empty storage as a 32-byte root."
+        ),
+    )
 
     rlp_fields: ClassVar[List[str]] = [
         "address",
@@ -131,6 +142,24 @@ class BalAccountChange(CamelModel, RLPSerializable):
         "nonce_changes",
         "code_changes",
     ]
+
+    def get_rlp_fields(self) -> List[str]:
+        """
+        Return the RLP fields for the account entry.
+
+        EIP-8268 extends the original six-field EIP-7928 account entry with a
+        trailing ``storage_root`` only when the account has state changes.
+        Access-only accounts keep the original six-field layout.
+        """
+        fields = list(self.rlp_fields)
+        if (
+            self.storage_changes
+            or self.balance_changes
+            or self.nonce_changes
+            or self.code_changes
+        ):
+            fields.append("storage_root")
+        return fields
 
 
 BlockAccessListChangeLists = Union[
@@ -148,4 +177,5 @@ __all__ = [
     "BalStorageSlot",
     "BalAccountChange",
     "BlockAccessListChangeLists",
+    "StorageRoot",
 ]

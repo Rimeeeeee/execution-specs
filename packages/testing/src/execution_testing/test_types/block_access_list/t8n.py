@@ -11,6 +11,7 @@ from execution_testing.base_types import (
     Address,
     Bytes,
     EthereumTestRootModel,
+    Hash,
     ZeroPaddedHexNumber,
 )
 from execution_testing.base_types.serialization import (
@@ -58,6 +59,18 @@ def _hex_from_rlp(data: Simple) -> ZeroPaddedHexNumber:
     return ZeroPaddedHexNumber(_int_from_rlp(data))
 
 
+def _storage_root_from_rlp(data: Simple) -> Bytes | Hash:
+    """Decode an EIP-8268 storage root from RLP."""
+    raw = _bytes_from_rlp(data)
+    if len(raw) == 0:
+        return Bytes()
+    if len(raw) == 32:
+        return Hash(raw)
+    raise BlockAccessListValidationError(
+        f"BAL storage_root must be empty bytes or 32 bytes, got {len(raw)}"
+    )
+
+
 def _decode_indexed_changes(
     rlp_list: Simple,
     cls: type[IndexedChange],
@@ -81,7 +94,8 @@ class BlockAccessList(EthereumTestRootModel[List[BalAccountChange]]):
     """
     Block Access List for t8n tool communication and fixtures.
 
-    This model represents the BAL exactly as defined in EIP-7928
+    This model represents the BAL format from EIP-7928 plus the EIP-8268
+    storage-root extension
     - it is itself a list of account changes (root model), not a container.
 
     Used for:
@@ -104,17 +118,23 @@ class BlockAccessList(EthereumTestRootModel[List[BalAccountChange]]):
         """
         Decode an RLP-encoded block access list into a BlockAccessList.
 
-        The RLP structure per EIP-7928 is:
+        The RLP structure per EIP-8268 is:
         [
           [address, storage_changes, storage_reads,
-           balance_changes, nonce_changes, code_changes],
+           balance_changes, nonce_changes, code_changes, storage_root],
           ...
         ]
+        Access-only accounts retain the six-field EIP-7928 layout.
         """
         decoded = _seq_from_rlp(eth_rlp.decode(data))
         accounts = []
         for account_rlp in decoded:
             fields = _seq_from_rlp(account_rlp)
+            if len(fields) not in (6, 7):
+                raise BlockAccessListValidationError(
+                    f"BAL account entry must have 6 or 7 fields, got "
+                    f"{len(fields)}"
+                )
 
             storage_changes = []
             for slot_entry in _seq_from_rlp(fields[1]):
@@ -149,13 +169,18 @@ class BlockAccessList(EthereumTestRootModel[List[BalAccountChange]]):
                         "new_code",
                         value_fn=lambda v: Bytes(_bytes_from_rlp(v)),
                     ),
+                    storage_root=(
+                        _storage_root_from_rlp(fields[6])
+                        if len(fields) == 7
+                        else None
+                    ),
                 )
             )
 
         return cls(root=accounts)
 
     def to_list(self) -> List[Any]:
-        """Return the list for RLP encoding per EIP-7928."""
+        """Return the list for RLP encoding per EIP-8268."""
         return to_serializable_element(self.root)
 
     @cached_property
