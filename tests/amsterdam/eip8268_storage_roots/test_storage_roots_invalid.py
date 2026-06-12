@@ -19,6 +19,7 @@ from execution_testing import (
     Storage,
     Transaction,
 )
+from execution_testing.base_types import HashInt
 from execution_testing.test_types.block_access_list import (
     BlockAccessList,
     StorageRoot,
@@ -69,7 +70,7 @@ def test_invalid_non_empty_storage_root(
     actual post-block storage trie root.
     """
     sender = pre.fund_eoa(amount=10**18)
-    storage = Storage({1: 1})
+    storage = Storage({HashInt(1): HashInt(1)})
     contract = pre.deploy_contract(
         code=Op.STOP,
         storage=storage,
