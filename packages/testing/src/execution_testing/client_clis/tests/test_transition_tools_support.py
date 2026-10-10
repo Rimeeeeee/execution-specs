@@ -6,13 +6,13 @@ import pytest
 
 from execution_testing.base_types import (
     AccessList,
-    Account,
     Address,
     Storage,
     TestAddress,
     TestPrivateKey,
 )
 from execution_testing.client_clis import (
+    EvmOneTransitionTool,
     ExecutionSpecsTransitionTool,
     TransitionTool,
 )
@@ -33,6 +33,7 @@ from execution_testing.forks import (
 )
 from execution_testing.specs import Block, BlockchainTest
 from execution_testing.test_types import (
+    Account,
     Alloc,
     AuthorizationTuple,
     Environment,
@@ -74,9 +75,9 @@ def test_t8n_support(fork: Fork, installed_t8n: TransitionTool) -> None:
     """Stress test that sends all possible t8n interactions."""
     if fork in [MuirGlacier, ArrowGlacier, GrayGlacier]:
         return
-    if isinstance(installed_t8n, ExecutionSpecsTransitionTool) and fork in [
-        Constantinople
-    ]:
+    if isinstance(
+        installed_t8n, (ExecutionSpecsTransitionTool, EvmOneTransitionTool)
+    ) and fork in [Constantinople]:
         return
     env = Environment()
     sender = TestAddress

@@ -21,10 +21,11 @@ from execution_testing import (
     compute_create_address,
 )
 from execution_testing.forks import Fork
-from execution_testing.specs.static_state.expect_section import (
+from execution_testing.vm import Op
+
+from tests.ported_static.post_state_resolution import (
     resolve_expect_post,
 )
-from execution_testing.vm import Op
 
 REFERENCE_SPEC_GIT_PATH = "N/A"
 REFERENCE_SPEC_VERSION = "N/A"
@@ -189,7 +190,7 @@ def test_create2_suicide(
         },
         {
             "indexes": {"data": [6, 7], "gas": -1, "value": -1},
-            "network": [">=Cancun"],
+            "network": [">=Cancun<Amsterdam"],
             "result": {
                 compute_create_address(address=sender, nonce=0): Account(
                     balance=9, nonce=2
@@ -197,6 +198,31 @@ def test_create2_suicide(
                 Address(
                     0x6CD0E5133771823DA00D4CB545EC8CDAB0E38203
                 ): Account.NONEXISTENT,
+            },
+        },
+        # per EIP-8246
+        {
+            "indexes": {"data": [6], "gas": -1, "value": -1},
+            "network": [">=Amsterdam"],
+            "result": {
+                compute_create_address(address=sender, nonce=0): Account(
+                    balance=9, nonce=2
+                ),
+                Address(
+                    0x6CD0E5133771823DA00D4CB545EC8CDAB0E38203
+                ): Account.NONEXISTENT,
+            },
+        },
+        {
+            "indexes": {"data": [7], "gas": -1, "value": -1},
+            "network": [">=Amsterdam"],
+            "result": {
+                compute_create_address(address=sender, nonce=0): Account(
+                    balance=9, nonce=2
+                ),
+                Address(0x6CD0E5133771823DA00D4CB545EC8CDAB0E38203): Account(
+                    balance=1, nonce=0, code=b"", storage={}
+                ),
             },
         },
         {

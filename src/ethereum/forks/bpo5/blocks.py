@@ -59,9 +59,9 @@ class Withdrawal:
     The execution-layer address receiving the withdrawn ETH.
     """
 
-    amount: U256
+    amount: U64
     """
-    The amount of ETH being withdrawn.
+    The amount of ETH being withdrawn, in Gwei.
     """
 
 
@@ -109,12 +109,12 @@ class Header:
     Root hash ([`keccak256`]) of the state trie after executing all
     transactions in this block. It represents the state of the Ethereum Virtual
     Machine (EVM) after all transactions in this block have been processed. It
-    is computed using [`compute_state_root_and_trie_changes()`][changes],
+    is computed using [`compute_state_root()`][changes],
     which computes the root of the Merkle-Patricia [Trie] representing the
     Ethereum world state after applying the block's state changes.
 
     [`keccak256`]: ref:ethereum.crypto.hash.keccak256
-    [changes]: ref:ethereum.state.State.compute_state_root_and_trie_changes
+    [changes]: ref:ethereum.state_mpt.State.compute_state_root
     [Trie]: ref:ethereum.merkle_patricia_trie.Trie
     """  # noqa: E501
 
@@ -164,9 +164,11 @@ class Header:
     Maximum gas allowed in this block. Pre [EIP-1559], this was the maximum
     gas that could be consumed by all transactions in the block. Post
     [EIP-1559], this is still the maximum gas limit, but the base fee per gas
-    is also considered when calculating the effective gas limit. This can be
-    [adjusted by a factor of 1/1024] from the previous block's gas limit, up
-    until a maximum of 30 million gas.
+    is adjusted so that effective block gas utilization targets 50% of
+    that limit. The gas_limit is a voted parameter that can be
+    [adjusted by a factor of 1/1024] from the previous block's limit by the
+    block proposer, allowing the network to coordinate on capacity
+    increases (e.g. the 60M limit proposed in EIP-7935).
 
     [EIP-1559]: https://eips.ethereum.org/EIPS/eip-1559
     [adjusted by a factor of 1/1024]:

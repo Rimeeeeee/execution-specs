@@ -5,7 +5,6 @@ from typing import Callable
 import pytest
 from execution_testing import (
     Account,
-    Address,
     Alloc,
     BalAccountExpectation,
     BalBalanceChange,
@@ -15,18 +14,14 @@ from execution_testing import (
     Block,
     BlockAccessListExpectation,
     BlockchainTestFiller,
-    Fork,
     Op,
+    SystemContractInteractionBase,
+    SystemContractInteractionContract,
+    SystemContractInteractionTransaction,
     Transaction,
+    WithdrawalRequest,
 )
 
-from ...prague.eip7002_el_triggerable_withdrawals.helpers import (
-    WithdrawalRequest,
-    WithdrawalRequestContract,
-    WithdrawalRequestInteractionBase,
-    WithdrawalRequestTransaction,
-)
-from ...prague.eip7002_el_triggerable_withdrawals.spec import Spec as Spec7002
 from .spec import ref_spec_7928
 
 REFERENCE_SPEC_GIT_PATH = ref_spec_7928.git_path
@@ -66,7 +61,9 @@ def _build_queue_storage_slots(
     queue_writes = []
     queue_reads = []
     for i in range(num_reqs):
-        base_slot = Spec7002.WITHDRAWAL_REQUEST_QUEUE_STORAGE_OFFSET + (i * 3)
+        base_slot = WithdrawalRequest.queue_offset + (
+            i * WithdrawalRequest.slots_per_request
+        )
         # Slot +0: source address
         queue_writes.append(
             BalStorageSlot(
@@ -177,7 +174,6 @@ def _build_incremental_changes(
 def test_bal_7002_clean_sweep(
     pre: Alloc,
     blockchain_test: BlockchainTestFiller,
-    fork: Fork,
     pubkey: bytes,
     amount: int,
 ) -> None:
@@ -194,21 +190,15 @@ def test_bal_7002_clean_sweep(
     withdrawal_request = WithdrawalRequest(
         validator_pubkey=pubkey,
         amount=amount,
-        fee=Spec7002.get_fee(0),
+        fee=WithdrawalRequest.get_fee(0),
     )
-
-    # Predeploy sweep performs first-time SSTOREs for queue, count, and
-    # tail slots. `sstore_state_gas()` is 0 pre-EIP-8037 and scales with
-    # cpsb on Amsterdam, keeping this budget CPSB-agnostic.
-    gas_limit = 200_000 + 5 * Op.SSTORE(new_value=1).state_cost(fork)
 
     # Transaction to system contract
     tx = Transaction(
         sender=alice,
-        to=Address(Spec7002.WITHDRAWAL_REQUEST_PREDEPLOY_ADDRESS),
+        to=WithdrawalRequest.system_contract_address,
         value=withdrawal_request.fee,
         data=withdrawal_request.calldata,
-        gas_limit=gas_limit,
     )
 
     # Build queue writes and reads based on pubkey
@@ -219,9 +209,9 @@ def test_bal_7002_clean_sweep(
     # Base storage reads that always happen
     base_storage_reads = [
         # Excess is read-only if while dequeuing queue doesn't overflow
-        Spec7002.EXCESS_WITHDRAWAL_REQUESTS_STORAGE_SLOT,
+        WithdrawalRequest.excess_slot,
         # Head slot is read while dequeuing
-        Spec7002.WITHDRAWAL_REQUEST_QUEUE_HEAD_STORAGE_SLOT,
+        WithdrawalRequest.queue_head_slot,
     ]
 
     block = Block(
@@ -233,7 +223,7 @@ def test_bal_7002_clean_sweep(
                         BalNonceChange(block_access_index=1, post_nonce=1)
                     ],
                 ),
-                Spec7002.WITHDRAWAL_REQUEST_PREDEPLOY_ADDRESS: BalAccountExpectation(  # noqa: E501
+                WithdrawalRequest.system_contract_address: BalAccountExpectation(  # noqa: E501
                     balance_changes=[
                         # Fee is collected.
                         BalBalanceChange(
@@ -244,7 +234,7 @@ def test_bal_7002_clean_sweep(
                     storage_reads=base_storage_reads + queue_reads,
                     storage_changes=[
                         BalStorageSlot(
-                            slot=Spec7002.WITHDRAWAL_REQUEST_COUNT_STORAGE_SLOT,
+                            slot=WithdrawalRequest.count_slot,
                             # Count goes by number of request.
                             # Invariant 1: Post-execution ALWAYS resets count.
                             slot_changes=_build_incremental_changes(
@@ -256,7 +246,7 @@ def test_bal_7002_clean_sweep(
                             ),
                         ),
                         BalStorageSlot(
-                            slot=Spec7002.WITHDRAWAL_REQUEST_QUEUE_TAIL_STORAGE_SLOT,
+                            slot=WithdrawalRequest.queue_tail_slot,
                             # Tail index goes up by number of requests.
                             # Invariant 2: resets if clean sweep.
                             slot_changes=_build_incremental_changes(
@@ -279,7 +269,7 @@ def test_bal_7002_clean_sweep(
         blocks=[block],
         post={
             alice: Account(nonce=1),
-            Spec7002.WITHDRAWAL_REQUEST_PREDEPLOY_ADDRESS: Account(
+            WithdrawalRequest.system_contract_address: Account(
                 balance=withdrawal_request.fee,
                 storage=_extract_post_storage_from_queue_writes(queue_writes),
             ),
@@ -290,7 +280,6 @@ def test_bal_7002_clean_sweep(
 def test_bal_7002_partial_sweep(
     pre: Alloc,
     blockchain_test: BlockchainTestFiller,
-    fork: Fork,
 ) -> None:
     """
     Ensure BAL correctly tracks queue overflow when requests exceed MAX.
@@ -298,13 +287,8 @@ def test_bal_7002_partial_sweep(
     Block 2: Empty (clean sweep of remaining 4).
     """
     num_requests = 20
-    fee = Spec7002.get_fee(0)
+    fee = WithdrawalRequest.get_fee(0)
     senders = [pre.fund_eoa() for _ in range(num_requests)]
-
-    # Predeploy sweep performs first-time SSTOREs for queue, count, and
-    # tail slots. `sstore_state_gas()` is 0 pre-EIP-8037 and scales with
-    # cpsb on Amsterdam, keeping this budget CPSB-agnostic.
-    gas_limit = 200_000 + 5 * Op.SSTORE(new_value=1).state_cost(fork)
 
     # Block 1: 20 withdrawal requests
     withdrawal_requests = [
@@ -312,7 +296,7 @@ def test_bal_7002_partial_sweep(
         for i in range(num_requests)
     ]
 
-    eip7002_address = Address(Spec7002.WITHDRAWAL_REQUEST_PREDEPLOY_ADDRESS)
+    eip7002_address = WithdrawalRequest.system_contract_address
 
     txs_block_1 = [
         Transaction(
@@ -320,16 +304,13 @@ def test_bal_7002_partial_sweep(
             to=eip7002_address,
             value=withdrawal_request.fee,
             data=withdrawal_request.calldata,
-            gas_limit=gas_limit,
         )
         for sender, withdrawal_request in zip(
             senders, withdrawal_requests, strict=True
         )
     ]
 
-    excess_after_block_1 = Spec7002.get_excess_withdrawal_requests(
-        0, num_requests
-    )
+    excess_after_block_1 = WithdrawalRequest.get_excess(0, num_requests)
 
     block_1_expectations: dict = {
         sender: BalAccountExpectation(
@@ -357,7 +338,7 @@ def test_bal_7002_partial_sweep(
             # Excess is only updated once during
             # dequeue
             BalStorageSlot(
-                slot=Spec7002.EXCESS_WITHDRAWAL_REQUESTS_STORAGE_SLOT,
+                slot=WithdrawalRequest.excess_slot,
                 slot_changes=[
                     BalStorageChange(
                         block_access_index=num_requests + 1,
@@ -366,7 +347,7 @@ def test_bal_7002_partial_sweep(
                 ],
             ),
             BalStorageSlot(
-                slot=Spec7002.WITHDRAWAL_REQUEST_COUNT_STORAGE_SLOT,
+                slot=WithdrawalRequest.count_slot,
                 slot_changes=_build_incremental_changes(
                     num_requests,
                     BalStorageChange,
@@ -376,16 +357,16 @@ def test_bal_7002_partial_sweep(
                 ),
             ),
             BalStorageSlot(
-                slot=Spec7002.WITHDRAWAL_REQUEST_QUEUE_HEAD_STORAGE_SLOT,
+                slot=WithdrawalRequest.queue_head_slot,
                 slot_changes=[
                     BalStorageChange(
                         block_access_index=num_requests + 1,
-                        post_value=Spec7002.MAX_WITHDRAWAL_REQUESTS_PER_BLOCK,
+                        post_value=WithdrawalRequest.max_per_block,
                     )
                 ],
             ),
             BalStorageSlot(
-                slot=Spec7002.WITHDRAWAL_REQUEST_QUEUE_TAIL_STORAGE_SLOT,
+                slot=WithdrawalRequest.queue_tail_slot,
                 slot_changes=_build_incremental_changes(
                     num_requests,
                     BalStorageChange,
@@ -398,16 +379,16 @@ def test_bal_7002_partial_sweep(
     )
 
     # Block 2: Empty block, clean sweep of remaining 4 requests
-    excess_after_block_2 = Spec7002.get_excess_withdrawal_requests(
+    excess_after_block_2 = WithdrawalRequest.get_excess(
         excess_after_block_1, 0
     )
 
     block_2_expectations = {
         eip7002_address: BalAccountExpectation(
-            storage_reads=[Spec7002.WITHDRAWAL_REQUEST_COUNT_STORAGE_SLOT],
+            storage_reads=[WithdrawalRequest.count_slot],
             storage_changes=[
                 BalStorageSlot(
-                    slot=Spec7002.EXCESS_WITHDRAWAL_REQUESTS_STORAGE_SLOT,
+                    slot=WithdrawalRequest.excess_slot,
                     slot_changes=[
                         BalStorageChange(
                             block_access_index=1,
@@ -417,14 +398,14 @@ def test_bal_7002_partial_sweep(
                 ),
                 # Head is cleared
                 BalStorageSlot(
-                    slot=Spec7002.WITHDRAWAL_REQUEST_QUEUE_HEAD_STORAGE_SLOT,
+                    slot=WithdrawalRequest.queue_head_slot,
                     slot_changes=[
                         BalStorageChange(block_access_index=1, post_value=0)
                     ],
                 ),
                 # Tail is cleared
                 BalStorageSlot(
-                    slot=Spec7002.WITHDRAWAL_REQUEST_QUEUE_TAIL_STORAGE_SLOT,
+                    slot=WithdrawalRequest.queue_tail_slot,
                     slot_changes=[
                         BalStorageChange(block_access_index=1, post_value=0)
                     ],
@@ -435,9 +416,7 @@ def test_bal_7002_partial_sweep(
 
     # Build post state storage: queue data persists even after dequeue
     post_storage = _extract_post_storage_from_queue_writes(queue_writes)
-    post_storage[Spec7002.EXCESS_WITHDRAWAL_REQUESTS_STORAGE_SLOT] = (
-        excess_after_block_2
-    )
+    post_storage[WithdrawalRequest.excess_slot] = excess_after_block_2
 
     blockchain_test(
         pre=pre,
@@ -468,7 +447,6 @@ def test_bal_7002_partial_sweep(
 def test_bal_7002_no_withdrawal_requests(
     pre: Alloc,
     blockchain_test: BlockchainTestFiller,
-    fork: Fork,
 ) -> None:
     """
     Ensure BAL captures EIP-7002 system contract dequeue operation even
@@ -483,16 +461,10 @@ def test_bal_7002_no_withdrawal_requests(
 
     value = 10
 
-    # Predeploy sweep performs first-time SSTOREs for queue, count, and
-    # tail slots. `sstore_state_gas()` is 0 pre-EIP-8037 and scales with
-    # cpsb on Amsterdam, keeping this budget CPSB-agnostic.
-    gas_limit = 200_000 + 5 * Op.SSTORE(new_value=1).state_cost(fork)
-
     tx = Transaction(
         sender=alice,
         to=bob,
         value=value,
-        gas_limit=gas_limit,
     )
 
     block = Block(
@@ -511,12 +483,12 @@ def test_bal_7002_no_withdrawal_requests(
                         )
                     ],
                 ),
-                Spec7002.WITHDRAWAL_REQUEST_PREDEPLOY_ADDRESS: BalAccountExpectation(  # noqa: E501
+                WithdrawalRequest.system_contract_address: BalAccountExpectation(  # noqa: E501
                     storage_reads=[
-                        Spec7002.EXCESS_WITHDRAWAL_REQUESTS_STORAGE_SLOT,
-                        Spec7002.WITHDRAWAL_REQUEST_COUNT_STORAGE_SLOT,
-                        Spec7002.WITHDRAWAL_REQUEST_QUEUE_HEAD_STORAGE_SLOT,
-                        Spec7002.WITHDRAWAL_REQUEST_QUEUE_TAIL_STORAGE_SLOT,
+                        WithdrawalRequest.excess_slot,
+                        WithdrawalRequest.count_slot,
+                        WithdrawalRequest.queue_head_slot,
+                        WithdrawalRequest.queue_tail_slot,
                     ],
                     storage_changes=[],
                 ),
@@ -546,17 +518,18 @@ def test_bal_7002_request_from_contract(
     contract with withdrawal request. Withdrawal request should have
     source_address = RelayContract (not Alice).
     """
-    fee = Spec7002.get_fee(0)
+    fee = WithdrawalRequest.get_fee(0)
 
     # Create withdrawal request interaction using Prague helper
-    interaction = WithdrawalRequestContract(
-        requests=[
-            WithdrawalRequest(
-                validator_pubkey=0x01,
-                amount=0,
-                fee=fee,
-            )
-        ],
+    withdrawal_requests = [
+        WithdrawalRequest(
+            validator_pubkey=0x01,
+            amount=0,
+            fee=fee,
+        )
+    ]
+    interaction = SystemContractInteractionContract(
+        requests=withdrawal_requests,
         contract_balance=fee,
     )
 
@@ -568,7 +541,7 @@ def test_bal_7002_request_from_contract(
 
     # Build queue storage slots with contract as source
     queue_writes, queue_reads = _build_queue_storage_slots(
-        [relay_contract], prepared.requests
+        [relay_contract], withdrawal_requests
     )
 
     block = Block(
@@ -588,7 +561,7 @@ def test_bal_7002_request_from_contract(
                         )
                     ],
                 ),
-                Spec7002.WITHDRAWAL_REQUEST_PREDEPLOY_ADDRESS: BalAccountExpectation(  # noqa: E501
+                WithdrawalRequest.system_contract_address: BalAccountExpectation(  # noqa: E501
                     balance_changes=[
                         BalBalanceChange(
                             block_access_index=1,
@@ -596,13 +569,13 @@ def test_bal_7002_request_from_contract(
                         )
                     ],
                     storage_reads=[
-                        Spec7002.EXCESS_WITHDRAWAL_REQUESTS_STORAGE_SLOT,
-                        Spec7002.WITHDRAWAL_REQUEST_QUEUE_HEAD_STORAGE_SLOT,
+                        WithdrawalRequest.excess_slot,
+                        WithdrawalRequest.queue_head_slot,
                     ]
                     + queue_reads,
                     storage_changes=[
                         BalStorageSlot(
-                            slot=Spec7002.WITHDRAWAL_REQUEST_COUNT_STORAGE_SLOT,
+                            slot=WithdrawalRequest.count_slot,
                             slot_changes=_build_incremental_changes(
                                 1,
                                 BalStorageChange,
@@ -612,7 +585,7 @@ def test_bal_7002_request_from_contract(
                             ),
                         ),
                         BalStorageSlot(
-                            slot=Spec7002.WITHDRAWAL_REQUEST_QUEUE_TAIL_STORAGE_SLOT,
+                            slot=WithdrawalRequest.queue_tail_slot,
                             slot_changes=_build_incremental_changes(
                                 1,
                                 BalStorageChange,
@@ -634,7 +607,7 @@ def test_bal_7002_request_from_contract(
         post={
             alice: Account(nonce=1),
             relay_contract: Account(balance=0),
-            Spec7002.WITHDRAWAL_REQUEST_PREDEPLOY_ADDRESS: Account(
+            WithdrawalRequest.system_contract_address: Account(
                 balance=fee,
                 storage=_extract_post_storage_from_queue_writes(queue_writes),
             ),
@@ -646,7 +619,7 @@ def test_bal_7002_request_from_contract(
     "interaction",
     [
         pytest.param(
-            WithdrawalRequestTransaction(
+            SystemContractInteractionTransaction(
                 requests=[
                     WithdrawalRequest(
                         validator_pubkey=0x01,
@@ -659,12 +632,12 @@ def test_bal_7002_request_from_contract(
             id="insufficient_fee",
         ),
         pytest.param(
-            WithdrawalRequestTransaction(
+            SystemContractInteractionTransaction(
                 requests=[
                     WithdrawalRequest(
                         validator_pubkey=0x01,
                         amount=0,
-                        fee=Spec7002.get_fee(0),
+                        fee=WithdrawalRequest.get_fee(0),
                         calldata_modifier=lambda x: x[
                             :-1
                         ],  # 55 bytes instead of 56
@@ -675,12 +648,12 @@ def test_bal_7002_request_from_contract(
             id="calldata_too_short",
         ),
         pytest.param(
-            WithdrawalRequestTransaction(
+            SystemContractInteractionTransaction(
                 requests=[
                     WithdrawalRequest(
                         validator_pubkey=0x01,
                         amount=0,
-                        fee=Spec7002.get_fee(0),
+                        fee=WithdrawalRequest.get_fee(0),
                         calldata_modifier=lambda x: (
                             x + b"\x00"
                         ),  # 57 bytes instead of 56
@@ -691,26 +664,26 @@ def test_bal_7002_request_from_contract(
             id="calldata_too_long",
         ),
         pytest.param(
-            WithdrawalRequestTransaction(
+            SystemContractInteractionTransaction(
                 requests=[
                     WithdrawalRequest(
                         validator_pubkey=0x01,
                         amount=0,
-                        fee=Spec7002.get_fee(0),
-                        gas_limit=25_000,  # Insufficient gas
+                        fee=WithdrawalRequest.get_fee(0),
                         valid=False,
                     )
-                ]
+                ],
+                gas_limits=[25_000],  # Insufficient gas
             ),
             id="oog",
         ),
         pytest.param(
-            WithdrawalRequestContract(
+            SystemContractInteractionContract(
                 requests=[
                     WithdrawalRequest(
                         validator_pubkey=0x01,
                         amount=0,
-                        fee=Spec7002.get_fee(0),
+                        fee=WithdrawalRequest.get_fee(0),
                         valid=False,
                     )
                 ],
@@ -719,12 +692,12 @@ def test_bal_7002_request_from_contract(
             id="invalid_call_type_delegatecall",
         ),
         pytest.param(
-            WithdrawalRequestContract(
+            SystemContractInteractionContract(
                 requests=[
                     WithdrawalRequest(
                         validator_pubkey=0x01,
                         amount=0,
-                        fee=Spec7002.get_fee(0),
+                        fee=WithdrawalRequest.get_fee(0),
                         valid=False,
                     )
                 ],
@@ -733,12 +706,12 @@ def test_bal_7002_request_from_contract(
             id="invalid_call_type_staticcall",
         ),
         pytest.param(
-            WithdrawalRequestContract(
+            SystemContractInteractionContract(
                 requests=[
                     WithdrawalRequest(
                         validator_pubkey=0x01,
                         amount=0,
-                        fee=Spec7002.get_fee(0),
+                        fee=WithdrawalRequest.get_fee(0),
                         valid=False,
                     )
                 ],
@@ -747,12 +720,12 @@ def test_bal_7002_request_from_contract(
             id="invalid_call_type_callcode",
         ),
         pytest.param(
-            WithdrawalRequestContract(
+            SystemContractInteractionContract(
                 requests=[
                     WithdrawalRequest(
                         validator_pubkey=0x01,
                         amount=0,
-                        fee=Spec7002.get_fee(0),
+                        fee=WithdrawalRequest.get_fee(0),
                         valid=False,
                     )
                 ],
@@ -765,7 +738,7 @@ def test_bal_7002_request_from_contract(
 def test_bal_7002_request_invalid(
     pre: Alloc,
     blockchain_test: BlockchainTestFiller,
-    interaction: WithdrawalRequestInteractionBase,
+    interaction: SystemContractInteractionBase,
 ) -> None:
     """
     Ensure BAL correctly handles invalid withdrawal request scenarios.
@@ -794,12 +767,12 @@ def test_bal_7002_request_invalid(
         alice: BalAccountExpectation(
             nonce_changes=[BalNonceChange(block_access_index=1, post_nonce=1)],
         ),
-        Spec7002.WITHDRAWAL_REQUEST_PREDEPLOY_ADDRESS: BalAccountExpectation(
+        WithdrawalRequest.system_contract_address: BalAccountExpectation(
             storage_reads=[
-                Spec7002.EXCESS_WITHDRAWAL_REQUESTS_STORAGE_SLOT,
-                Spec7002.WITHDRAWAL_REQUEST_COUNT_STORAGE_SLOT,
-                Spec7002.WITHDRAWAL_REQUEST_QUEUE_HEAD_STORAGE_SLOT,
-                Spec7002.WITHDRAWAL_REQUEST_QUEUE_TAIL_STORAGE_SLOT,
+                WithdrawalRequest.excess_slot,
+                WithdrawalRequest.count_slot,
+                WithdrawalRequest.queue_head_slot,
+                WithdrawalRequest.queue_tail_slot,
             ],
             storage_changes=[],
         ),
@@ -816,11 +789,11 @@ def test_bal_7002_request_invalid(
 
     post: dict = {
         alice: Account(nonce=1),
-        Spec7002.WITHDRAWAL_REQUEST_PREDEPLOY_ADDRESS: Account(storage={}),
+        WithdrawalRequest.system_contract_address: Account(storage={}),
     }
 
     # Add relay contract to post-state for contract scenarios
-    if isinstance(prepared, WithdrawalRequestContract):
+    if isinstance(prepared, SystemContractInteractionContract):
         post[prepared.contract_address] = Account()
 
     blockchain_test(

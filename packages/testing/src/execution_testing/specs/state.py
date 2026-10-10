@@ -46,7 +46,7 @@ from execution_testing.fixtures.state import (
     FixtureTransaction,
     FixtureTransactionReceipt,
 )
-from execution_testing.forks import Fork, TransitionFork
+from execution_testing.forks import Fork
 from execution_testing.logging import (
     get_logger,
 )
@@ -54,13 +54,14 @@ from execution_testing.test_types import (
     Alloc,
     BlockAccessListExpectation,
     Environment,
+    PostStateContext,
     Transaction,
 )
 
 from .base import BaseTest, FillResult, OpMode
 from .blockchain import Block, BlockchainTest, Header
 from .debugging import print_traces
-from .helpers import verify_transactions
+from .helpers import RecordedPostStateContext, verify_transactions
 
 logger = get_logger(__name__)
 
@@ -91,24 +92,14 @@ class StateTest(BaseTest):
     ] = [
         StateFixture,
     ] + [
-        LabeledFixtureFormat(
-            fixture_format,
-            f"{fixture_format.format_name}_from_state_test",
-            f"A {fixture_format.format_name} generated from a state_test",
+        fixture_format.with_label_suffix(
+            "from_state_test",
+            f"A {fixture_format.format_id()} generated from a state_test",
         )
         for fixture_format in BlockchainTest.supported_fixture_formats
         # Exclude sync fixtures from state tests - they don't make sense for
         # state tests
-        if not (
-            (
-                hasattr(fixture_format, "__name__")
-                and "Sync" in fixture_format.__name__
-            )
-            or (
-                hasattr(fixture_format, "format")
-                and "Sync" in fixture_format.format.__name__
-            )
-        )
+        if "Sync" not in fixture_format.format_class().__name__
     ]
     supported_execute_formats: ClassVar[Sequence[LabeledExecuteFormat]] = [
         LabeledExecuteFormat(
@@ -121,6 +112,33 @@ class StateTest(BaseTest):
     supported_markers: ClassVar[Dict[str, str]] = {
         "state_test_only": "Only generate a state test fixture",
     }
+
+    def post_state_context(
+        self,
+        *,
+        tx: Transaction,
+        env: Environment,
+        fork: Fork,
+        result: Result,
+    ) -> PostStateContext:
+        """Return the context in which the post-state is resolved."""
+        context = RecordedPostStateContext()
+        context.record_block(
+            txs=[tx],
+            fork=fork,
+            base_fee_per_gas=(
+                result.base_fee_per_gas
+                if result.base_fee_per_gas is not None
+                else env.base_fee_per_gas
+            ),
+            excess_blob_gas=(
+                result.excess_blob_gas
+                if result.excess_blob_gas is not None
+                else env.excess_blob_gas
+            ),
+            fee_recipient=env.fee_recipient,
+        )
+        return context
 
     def verify_modified_gas_limit(
         self,
@@ -167,9 +185,18 @@ class StateTest(BaseTest):
                 f"Traces are not equivalent (gas_limit={current_gas_limit})"
             )
             return False
-        modified_tool_alloc = modified_tool_output.alloc.get()
+        modified_tool_alloc = modified_tool_output.alloc.materialize()
         try:
-            self.post.verify_post_alloc(modified_tool_alloc)
+            self.post.verify_post_alloc(
+                pre_alloc=pre_alloc,
+                got_alloc=modified_tool_alloc,
+                context=self.post_state_context(
+                    tx=new_tx,
+                    env=env,
+                    fork=fork,
+                    result=modified_tool_output.result,
+                ),
+            )
         except Exception as e:
             logger.debug(
                 f"Post alloc is not equivalent (gas_limit={current_gas_limit})"
@@ -232,16 +259,13 @@ class StateTest(BaseTest):
     @classmethod
     def discard_fixture_format_by_marks(
         cls,
-        fixture_format: FixtureFormat,
-        fork: Fork | TransitionFork,
+        fixture_format: FixtureFormat | LabeledFixtureFormat,
         markers: List[pytest.Mark],
     ) -> bool:
         """
         Discard a fixture format from filling if the appropriate marker is
         used.
         """
-        del fork
-
         if "state_test_only" in [m.name for m in markers]:
             return fixture_format != StateFixture
         return False
@@ -283,7 +307,7 @@ class StateTest(BaseTest):
         if self.env.base_fee_per_gas:
             # Calculate genesis base fee per gas from state test's block#1 env
             kwargs["base_fee_per_gas"] = HexNumber(
-                int(int(str(self.env.base_fee_per_gas), 0) * 8 / 7)
+                int(str(self.env.base_fee_per_gas), 0) * 8 // 7
             )
 
         if self.env.excess_blob_gas:
@@ -335,6 +359,13 @@ class StateTest(BaseTest):
 
     def generate_blockchain_test(self) -> BlockchainTest:
         """Generate a BlockchainTest fixture from this StateTest fixture."""
+        # Checked before the genesis derivation below, which asks the
+        # fork for blob constants a fork without blobs does not have.
+        self.env.check_fork_fields(
+            self.fork.fork_at(
+                block_number=self.env.number, timestamp=self.env.timestamp
+            )
+        )
         return BlockchainTest.from_test(
             base_test=self,
             genesis_environment=self._generate_blockchain_genesis_environment(),
@@ -356,7 +387,15 @@ class StateTest(BaseTest):
         )
 
         env = self.env.set_fork_requirements(fork)
-        tx = self.tx.with_signature_and_sender(keep_secret_key=True)
+        env.check_fork_fields(fork)
+        tx = self.tx.with_gas_limit(
+            max_gas_limit=env.gas_limit,
+            transaction_gas_limit_cap=fork.transaction_gas_limit_cap(),
+            state_gas_reservoir_enabled=fork.state_gas_reservoir_enabled(),
+            transaction_total_gas_limit_cap=(
+                fork.transaction_total_gas_limit_cap()
+            ),
+        ).with_signature_and_sender(keep_secret_key=True)
         pre_alloc = Alloc.merge(
             Alloc.model_validate(fork.pre_allocation()),
             self.pre,
@@ -377,10 +416,19 @@ class StateTest(BaseTest):
             ),
             slow_request=self.is_tx_gas_heavy_test,
         )
-        output_alloc = transition_tool_output.alloc.get()
+        output_alloc = transition_tool_output.alloc.materialize()
 
         try:
-            self.post.verify_post_alloc(output_alloc)
+            self.post.verify_post_alloc(
+                pre_alloc=pre_alloc,
+                got_alloc=output_alloc,
+                context=self.post_state_context(
+                    tx=tx,
+                    env=env,
+                    fork=fork,
+                    result=transition_tool_output.result,
+                ),
+            )
         except Exception as e:
             print_traces(t8n.get_traces())
             raise e
@@ -407,7 +455,7 @@ class StateTest(BaseTest):
                 self.operation_mode == OpMode.OPTIMIZE_GAS_POST_PROCESSING
             )
             base_tool_output = transition_tool_output
-            base_tool_alloc = base_tool_output.alloc.get()
+            base_tool_alloc = base_tool_output.alloc.materialize()
             base_tool_result = base_tool_output.result
 
             assert base_tool_result.traces is not None, "Traces not found."
@@ -415,18 +463,20 @@ class StateTest(BaseTest):
             # First try reducing the gas limit only by one, if the validation
             # fails, it means that the traces change even with the slightest
             # modification to the gas.
+            tx_gas_limit = int(tx.gas_limit)
+
             if self.verify_modified_gas_limit(
                 t8n=t8n,
                 base_tool_result=base_tool_result,
                 base_tool_alloc=base_tool_alloc,
                 fork=fork,
-                current_gas_limit=self.tx.gas_limit - 1,
+                current_gas_limit=tx_gas_limit - 1,
                 pre_alloc=pre_alloc,
                 env=env,
                 ignore_gas_differences=ignore_gas_differences,
             ):
                 minimum_gas_limit = 0
-                maximum_gas_limit = int(self.tx.gas_limit)
+                maximum_gas_limit = tx_gas_limit
                 while minimum_gas_limit < maximum_gas_limit:
                     current_gas_limit = (
                         maximum_gas_limit + minimum_gas_limit
@@ -523,7 +573,7 @@ class StateTest(BaseTest):
     def generate(
         self,
         t8n: TransitionTool,
-        fixture_format: FixtureFormat,
+        fixture_format: FixtureFormat | LabeledFixtureFormat,
     ) -> FillResult:
         """Generate the BlockchainTest fixture."""
         self.check_exception_test(exception=self.tx.error is not None)
@@ -539,7 +589,7 @@ class StateTest(BaseTest):
     def execute(
         self,
         *,
-        execute_format: ExecuteFormat,
+        execute_format: ExecuteFormat | LabeledExecuteFormat,
     ) -> BaseExecute:
         """Generate the list of test fixtures."""
         if execute_format == TransactionPost:

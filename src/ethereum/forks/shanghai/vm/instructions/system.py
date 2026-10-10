@@ -21,8 +21,7 @@ from ethereum.state import Address
 from ethereum.utils.numeric import ceil32
 
 from ...state_tracker import (
-    account_has_code_or_nonce,
-    account_has_storage,
+    account_deployable,
     get_account,
     get_code,
     increment_nonce,
@@ -97,9 +96,7 @@ def generic_create(
 
     evm.accessed_addresses.add(contract_address)
 
-    if account_has_code_or_nonce(
-        evm.message.tx_env.state, contract_address
-    ) or account_has_storage(evm.message.tx_env.state, contract_address):
+    if not account_deployable(evm.message.tx_env.state, contract_address):
         increment_nonce(evm.message.tx_env.state, evm.message.current_target)
         push(evm.stack, U256(0))
         return
@@ -158,7 +155,8 @@ def create(evm: Evm) -> None:
     init_code_gas = init_code_cost(Uint(memory_size))
 
     charge_gas(
-        evm, GasCosts.OPCODE_CREATE_BASE + extend_memory.cost + init_code_gas
+        evm,
+        GasCosts.OPCODE_CREATE_BASE + extend_memory.cost + init_code_gas,
     )
 
     # OPERATION
@@ -601,7 +599,11 @@ def delegatecall(evm: Evm) -> None:
         access_gas_cost = GasCosts.COLD_ACCOUNT_ACCESS
 
     message_call_gas = calculate_message_call_gas(
-        U256(0), gas, Uint(evm.gas_left), extend_memory.cost, access_gas_cost
+        U256(0),
+        gas,
+        Uint(evm.gas_left),
+        extend_memory.cost,
+        access_gas_cost,
     )
     charge_gas(evm, message_call_gas.cost + extend_memory.cost)
 

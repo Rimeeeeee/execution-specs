@@ -25,10 +25,11 @@ from execution_testing import (
     compute_create_address,
 )
 from execution_testing.forks import Fork
-from execution_testing.specs.static_state.expect_section import (
+from execution_testing.vm import Op
+
+from tests.ported_static.post_state_resolution import (
     resolve_expect_post,
 )
-from execution_testing.vm import Op
 
 REFERENCE_SPEC_GIT_PATH = "N/A"
 REFERENCE_SPEC_VERSION = "N/A"
@@ -561,21 +562,11 @@ def test_sstore_change_from_external_call_in_init_code(
         )
         + Op.STOP,
     ]
-    # Fork-aware gas budget: contract-creation intrinsic from the
-    # fork's calculator, plus the bytecode's own gas cost (which
-    # already includes the gas forwarded to inner CALLs via opcode
-    # metadata).
-    intrinsic = fork.transaction_intrinsic_cost_calculator()(
-        calldata=tx_data[d],
-        contract_creation=True,
-    )
-    tx_gas = [intrinsic + tx_data[d].gas_cost(fork)]
 
     tx = Transaction(
         sender=sender,
         to=None,
         data=tx_data[d],
-        gas_limit=tx_gas[g],
         error=_exc,
     )
 

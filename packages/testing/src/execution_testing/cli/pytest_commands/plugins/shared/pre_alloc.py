@@ -6,7 +6,6 @@ from typing import Any, Dict, Literal, Set
 from pydantic import PrivateAttr
 
 from execution_testing.base_types import (
-    Account,
     Address,
     Hash,
     Number,
@@ -19,7 +18,7 @@ from execution_testing.base_types.conversions import (
     NumberConvertible,
 )
 from execution_testing.forks import Fork, TransitionFork
-from execution_testing.test_types import EOA
+from execution_testing.test_types import EOA, Account
 from execution_testing.test_types import Alloc as BaseAlloc
 
 
@@ -61,7 +60,7 @@ class Alloc(BaseAlloc):
     def __init__(
         self,
         *args: Any,
-        fork: Fork,
+        fork: Fork | TransitionFork,
         flags: AllocFlags,
         stub_eoas: Dict[str, EOA] | None = None,
         **kwargs: Any,
@@ -70,6 +69,7 @@ class Alloc(BaseAlloc):
         super().__init__(*args, **kwargs)
         self._fork = fork
         self._flags = flags
+        self._state_commitment = fork.transitions_from().state_commitment()
         if stub_eoas is not None:
             self._stub_eoas = stub_eoas
 

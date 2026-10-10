@@ -1,9 +1,10 @@
 """Helper functions."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Sequence
 
+from execution_testing.base_types import Address, HexNumber
 from execution_testing.client_clis import Result
 from execution_testing.exceptions import (
     BlockException,
@@ -12,10 +13,18 @@ from execution_testing.exceptions import (
     TransactionException,
     UndefinedException,
 )
+from execution_testing.forks import Fork
 from execution_testing.test_types import (
+    PostStateContext,
     Transaction,
     TransactionLog,
     TransactionReceipt,
+)
+from execution_testing.test_types.balance_expectations import (
+    TransactionKey,
+    TransactionLanding,
+    effective_gas_price,
+    transaction_key,
 )
 
 
@@ -131,6 +140,28 @@ class TransactionReceiptMismatchError(Exception):
             f"\n   What: {field_name} mismatch!"
             f"\n   Want: {expected_value}"
             f"\n    Got: {actual_value}"
+        )
+        super().__init__(message)
+
+
+class TransactionReceiptIncompleteError(Exception):
+    """
+    Exception used when the transition tool returns incomplete information
+    required to validate the test.
+    """
+
+    def __init__(
+        self,
+        index: int,
+        field_name: str,
+        expected_value: Any,
+    ):
+        """Initialize the exception."""
+        message = (
+            f"\nTransactionReceiptIncomplete (pos={index}):"
+            f"\n   What: {field_name} missing!"
+            f"\n   Want: {expected_value}"
+            f"\n    Got: MISSING"
         )
         super().__init__(message)
 
@@ -297,7 +328,9 @@ def verify_log(
 
 
 def verify_transaction_receipt(
+    *,
     transaction_index: int,
+    previous_cumulative_gas_used: int | None,
     expected_receipt: TransactionReceipt | None,
     actual_receipt: TransactionReceipt | None,
 ) -> None:
@@ -318,12 +351,46 @@ def verify_transaction_receipt(
     ):
         raise TransactionReceiptMismatchError(
             index=transaction_index,
-            field_name="gas_used",
+            field_name="cumulative_gas_used",
             expected_value=expected_receipt.cumulative_gas_used,
             actual_value=actual_receipt.cumulative_gas_used,
         )
-    if expected_receipt.logs is not None and actual_receipt.logs is not None:
+    if expected_receipt.gas_used is not None:
+        actual_gas_used: int
+        if actual_receipt.gas_used is not None:
+            actual_gas_used = actual_receipt.gas_used
+        else:
+            if previous_cumulative_gas_used is None:
+                raise TransactionReceiptIncompleteError(
+                    index=transaction_index - 1,
+                    field_name="cumulative_gas_used",
+                    expected_value=expected_receipt.gas_used,
+                )
+            current_cumulative_gas_used = actual_receipt.cumulative_gas_used
+            if current_cumulative_gas_used is None:
+                raise TransactionReceiptIncompleteError(
+                    index=transaction_index,
+                    field_name="cumulative_gas_used",
+                    expected_value=expected_receipt.gas_used,
+                )
+            actual_gas_used = HexNumber(
+                current_cumulative_gas_used - previous_cumulative_gas_used
+            )
+        if expected_receipt.gas_used != actual_gas_used:
+            raise TransactionReceiptMismatchError(
+                index=transaction_index,
+                field_name="gas_used",
+                expected_value=expected_receipt.gas_used,
+                actual_value=actual_gas_used,
+            )
+    if expected_receipt.logs is not None:
         actual_logs = actual_receipt.logs
+        if actual_logs is None:
+            raise TransactionReceiptIncompleteError(
+                index=transaction_index,
+                field_name="logs",
+                expected_value=expected_receipt.logs,
+            )
         expected_logs = expected_receipt.logs
         if len(expected_logs) != len(actual_logs):
             raise LogMismatchError(
@@ -337,6 +404,21 @@ def verify_transaction_receipt(
             zip(expected_logs, actual_logs, strict=True)
         ):
             verify_log(transaction_index, log_idx, expected, actual)
+    if expected_receipt.status is not None:
+        if actual_receipt.status is None:
+            raise TransactionReceiptIncompleteError(
+                index=transaction_index,
+                field_name="status/succeeded",
+                expected_value=expected_receipt.status,
+            )
+        if expected_receipt.status != actual_receipt.status:
+            raise TransactionReceiptMismatchError(
+                index=transaction_index,
+                field_name="status/succeeded",
+                expected_value=expected_receipt.status,
+                actual_value=actual_receipt.status,
+            )
+
     # TODO: Add more fields as needed
 
 
@@ -357,6 +439,7 @@ def verify_transactions(
     }
 
     receipt_index = 0
+    previous_cumulative_gas_used: int | None = 0
     for i, tx in enumerate(txs):
         error_message = rejected_txs[i] if i in rejected_txs else None
         info = TransactionExceptionInfo(
@@ -366,9 +449,14 @@ def verify_transactions(
         )
         info.verify(strict_match=transition_tool_exceptions_reliable)
         if error_message is None:
+            actual_receipt = result.receipts[receipt_index]
             verify_transaction_receipt(
-                i, tx.expected_receipt, result.receipts[receipt_index]
+                transaction_index=i,
+                previous_cumulative_gas_used=previous_cumulative_gas_used,
+                expected_receipt=tx.expected_receipt,
+                actual_receipt=actual_receipt,
             )
+            previous_cumulative_gas_used = actual_receipt.cumulative_gas_used
             receipt_index += 1
 
     return list(rejected_txs.keys())
@@ -391,3 +479,95 @@ def verify_block(
         got_exception=got_exception,
     )
     info.verify(strict_match=transition_tool_exceptions_reliable)
+
+
+class RecordedTransactionLanding(TransactionLanding):
+    """Landing whose pricing was known when the block was built."""
+
+    _effective_gas_price: int
+    _base_fee_per_gas: int
+    _blob_gas_price: int | None
+    _fee_recipient: Address
+
+    def __init__(
+        self,
+        *,
+        effective_gas_price: int,
+        base_fee_per_gas: int,
+        blob_gas_price: int | None,
+        fee_recipient: Address,
+    ) -> None:
+        """Store the block pricing."""
+        self._effective_gas_price = effective_gas_price
+        self._base_fee_per_gas = base_fee_per_gas
+        self._blob_gas_price = blob_gas_price
+        self._fee_recipient = fee_recipient
+
+    def effective_gas_price(self) -> int:
+        """Return the price per gas the transaction paid."""
+        return self._effective_gas_price
+
+    def base_fee_per_gas(self) -> int:
+        """Return the block base fee, or zero before the London fork."""
+        return self._base_fee_per_gas
+
+    def blob_gas_price(self) -> int | None:
+        """Return the block blob gas price, if blobs are supported."""
+        return self._blob_gas_price
+
+    def fee_recipient(self) -> Address:
+        """Return the block fee recipient."""
+        return self._fee_recipient
+
+
+@dataclass(kw_only=True)
+class RecordedPostStateContext(PostStateContext):
+    """
+    Context for filled tests, where every block is built locally.
+
+    Landings are recorded as each block is generated, so resolving one is a
+    dictionary lookup.
+    """
+
+    landings: Dict[TransactionKey, TransactionLanding] = field(
+        default_factory=dict
+    )
+
+    def record_block(
+        self,
+        *,
+        txs: Sequence[Transaction],
+        fork: Fork,
+        base_fee_per_gas: int | None,
+        excess_blob_gas: int | None,
+        fee_recipient: Address,
+    ) -> None:
+        """
+        Record that `txs` landed in a block with the given pricing.
+
+        Transactions expected to be rejected are skipped, since they never
+        land. Before the London fork there is no base fee, which is
+        equivalent to a base fee of zero: the fee recipient receives the
+        whole gas price.
+        """
+        base_fee = int(base_fee_per_gas) if base_fee_per_gas else 0
+        blob_gas_price: int | None = None
+        if fork.supports_blobs() and excess_blob_gas is not None:
+            blob_gas_price = fork.blob_gas_price_calculator()(
+                excess_blob_gas=int(excess_blob_gas)
+            )
+        for tx in txs:
+            if tx.error is not None:
+                continue
+            self.landings[transaction_key(tx)] = RecordedTransactionLanding(
+                effective_gas_price=effective_gas_price(tx, base_fee),
+                base_fee_per_gas=base_fee,
+                blob_gas_price=blob_gas_price,
+                fee_recipient=fee_recipient,
+            )
+
+    def landing(self, key: TransactionKey) -> TransactionLanding:
+        """Return the recorded landing of the transaction `key`."""
+        if key not in self.landings:
+            raise PostStateContext.TransactionNotLandedError(key)
+        return self.landings[key]

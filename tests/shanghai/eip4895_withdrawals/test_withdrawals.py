@@ -3,7 +3,7 @@ Tests for [EIP-4895: Beacon chain withdrawals](https://eips.ethereum.org/EIPS/ei
 """
 
 from enum import Enum, unique
-from typing import Dict, List, Mapping
+from typing import Dict, List
 
 import pytest
 from execution_testing import (
@@ -14,8 +14,10 @@ from execution_testing import (
     Block,
     BlockchainTestFiller,
     Fork,
+    GasFee,
     Hash,
     Op,
+    RecipientType,
     Transaction,
     TransactionException,
     Withdrawal,
@@ -34,6 +36,7 @@ pytestmark = pytest.mark.valid_from("Shanghai")
 ONE_GWEI = 10**9
 
 
+@pytest.mark.inclusion_test
 @pytest.mark.parametrize(
     "test_case",
     [
@@ -69,11 +72,16 @@ class TestUseValueInTx:
         return pre.fund_eoa(0)
 
     @pytest.fixture
-    def tx(self, sender: EOA, recipient: EOA) -> Transaction:  # noqa: D102
+    def tx(  # noqa: D102
+        self, sender: EOA, recipient: EOA, fork: Fork
+    ) -> Transaction:
         # Transaction sent from the `sender`, which has 1 wei balance at start
+        gas_limit = fork.transaction_intrinsic_cost_calculator()(
+            recipient_type=RecipientType.EOA,
+        )
         return Transaction(
             gas_price=ONE_GWEI,
-            gas_limit=21_000,
+            gas_limit=gas_limit,
             to=recipient,
             sender=sender,
         )
@@ -121,11 +129,26 @@ class TestUseValueInTx:
         raise Exception("Invalid test case.")
 
     @pytest.fixture
-    def post(self, sender: EOA, test_case: str) -> Dict:  # noqa: D102
+    def post(  # noqa: D102
+        self,
+        sender: EOA,
+        tx: Transaction,
+        withdrawal: Withdrawal,
+        test_case: str,
+    ) -> Dict:
         if test_case == "tx_in_withdrawals_block":
             return {}
         if test_case == "tx_after_withdrawals_block":
-            return {sender: Account(balance=ONE_GWEI + 1)}
+            # The withdrawal (in Gwei) covers the transaction's fee at a
+            # gas price of one Gwei, leaving one Gwei on top of the
+            # sender's initial one wei.
+            return {
+                sender: Account(
+                    nonce=1,
+                    balance_change=withdrawal.amount * ONE_GWEI
+                    - GasFee(tx, gas=tx.gas_limit),
+                )
+            }
         raise Exception("Invalid test case.")
 
     def test_use_value_in_tx(
@@ -142,30 +165,21 @@ class TestUseValueInTx:
 def test_use_value_in_contract(
     blockchain_test: BlockchainTestFiller,
     pre: Alloc,
-    fork: Fork,
 ) -> None:
     """Test sending value from contract that has not received a withdrawal."""
     sender = pre.fund_eoa()
     recipient = pre.fund_eoa(1)
 
-    contract_code = Op.SSTORE(
-        Op.NUMBER,
-        Op.CALL(address=recipient, value=1000000000),
-    )
-    contract_address = pre.deploy_contract(contract_code)
-
-    intrinsic_calc = fork.transaction_intrinsic_cost_calculator()
-    tx_gas = (
-        intrinsic_calc()
-        + contract_code.gas_cost(fork)
-        + fork.gas_costs().CALL_VALUE
-        + Op.SSTORE(new_value=1).state_cost(fork)
+    contract_address = pre.deploy_contract(
+        Op.SSTORE(
+            Op.NUMBER,
+            Op.CALL(address=recipient, value=1000000000),
+        )
     )
     (tx_0, tx_1) = (
         Transaction(
             sender=sender,
             value=0,
-            gas_limit=tx_gas,
             to=contract_address,
         )
         for _ in range(2)
@@ -203,7 +217,7 @@ def test_use_value_in_contract(
 
 
 def test_balance_within_block(
-    blockchain_test: BlockchainTestFiller, pre: Alloc, fork: Fork
+    blockchain_test: BlockchainTestFiller, pre: Alloc
 ) -> None:
     """
     Test withdrawal balance increase within the same block in a contract call.
@@ -215,19 +229,12 @@ def test_balance_within_block(
     sender = pre.fund_eoa()
     recipient = pre.fund_eoa(ONE_GWEI)
     contract_address = pre.deploy_contract(save_balance_on_block_number)
-    intrinsic_calc = fork.transaction_intrinsic_cost_calculator()
-    tx_gas = (
-        intrinsic_calc(calldata=Hash(recipient, left_padding=True))
-        + save_balance_on_block_number.gas_cost(fork)
-        + Op.SSTORE(new_value=1).state_cost(fork)
-    )
 
     blocks = [
         Block(
             txs=[
                 Transaction(
                     sender=sender,
-                    gas_limit=tx_gas,
                     to=contract_address,
                     data=Hash(recipient, left_padding=True),
                 )
@@ -245,7 +252,6 @@ def test_balance_within_block(
             txs=[
                 Transaction(
                     sender=sender,
-                    gas_limit=tx_gas,
                     to=contract_address,
                     data=Hash(recipient, left_padding=True),
                 )
@@ -530,29 +536,21 @@ def test_newly_created_contract(
 def test_no_evm_execution(
     blockchain_test: BlockchainTestFiller,
     pre: Alloc,
-    fork: Fork,
 ) -> None:
     """Test withdrawals don't trigger EVM execution."""
     sender = pre.fund_eoa()
-    contract_code = Op.SSTORE(Op.NUMBER, 1)
-    contracts = [pre.deploy_contract(contract_code) for _ in range(4)]
-    intrinsic_calc = fork.transaction_intrinsic_cost_calculator()
-    tx_gas = (
-        intrinsic_calc()
-        + contract_code.gas_cost(fork)
-        + Op.SSTORE(new_value=1).state_cost(fork)
-    )
+    contracts = [
+        pre.deploy_contract(Op.SSTORE(Op.NUMBER, 1)) for _ in range(4)
+    ]
     blocks = [
         Block(
             txs=[
                 Transaction(
                     sender=sender,
-                    gas_limit=tx_gas,
                     to=contracts[2],
                 ),
                 Transaction(
                     sender=sender,
-                    gas_limit=tx_gas,
                     to=contracts[3],
                 ),
             ],
@@ -575,12 +573,10 @@ def test_no_evm_execution(
             txs=[
                 Transaction(
                     sender=sender,
-                    gas_limit=tx_gas,
                     to=contracts[0],
                 ),
                 Transaction(
                     sender=sender,
-                    gas_limit=tx_gas,
                     to=contracts[1],
                 ),
             ],
@@ -680,7 +676,7 @@ def test_zero_amount(
             amount=2**64 - 1,
         ),
     ]
-    all_post = {
+    all_post: Dict[Address, Account | None] = {
         empty_accounts[0]: Account.NONEXISTENT,
         zero_balance_contract: Account(code=Op.STOP, balance=0),
         empty_accounts[1]: Account(balance=ONE_GWEI),
@@ -688,21 +684,18 @@ def test_zero_amount(
     }
 
     withdrawals: List[Withdrawal] = []
-    post: Mapping[Address, Account | object] = {}
+    post: Dict[Address, Account | None]
     if test_case == ZeroAmountTestCases.TWO_ZERO:
         withdrawals = all_withdrawals[0:2]
         post = {
             account: all_post[account]
-            for account in post
-            if account in [empty_accounts[0], zero_balance_contract]
+            for account in [empty_accounts[0], zero_balance_contract]
         }
     elif test_case == ZeroAmountTestCases.THREE_ONE_WITH_VALUE:
         withdrawals = all_withdrawals[0:3]
         post = {
             account: all_post[account]
-            for account in post
-            if account
-            in [
+            for account in [
                 empty_accounts[0],
                 zero_balance_contract,
                 empty_accounts[1],
@@ -725,8 +718,6 @@ def test_zero_amount(
 
     blockchain_test(
         pre=pre,
-        # TODO: Fix in BlockchainTest? post: Mapping[str, Account | object]
-        # to allow for Account.NONEXISTENT
         post=post,
         blocks=[Block(withdrawals=withdrawals)],
     )

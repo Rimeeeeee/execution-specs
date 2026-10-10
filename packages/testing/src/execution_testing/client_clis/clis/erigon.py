@@ -53,6 +53,10 @@ class ErigonExceptionMapper(ExceptionMapper):
         TransactionException.NONCE_MISMATCH_TOO_LOW: "nonce too low",
         TransactionException.NONCE_MISMATCH_TOO_HIGH: "nonce too high",
         TransactionException.GAS_ALLOWANCE_EXCEEDED: "gas limit reached",
+        TransactionException.INVALID_CHAINID: "invalid chain id for signer",
+        TransactionException.INVALID_SIGNATURE_VRS: (
+            "invalid transaction v, r, s values"
+        ),
         TransactionException.TYPE_3_TX_PRE_FORK: (
             "blob txn is not supported by signer"
         ),
@@ -116,6 +120,9 @@ class ErigonExceptionMapper(ExceptionMapper):
         BlockException.GAS_USED_OVERFLOW: "block gas used overflow",
     }
     mapping_regex = {
+        # In-range r that is not an x-coordinate on the curve: the range
+        # check passes and libsecp256k1 recovery itself fails.
+        TransactionException.INVALID_SIGNATURE_VRS: r"recovery failed",
         BlockException.INVALID_BAL_HASH: (
             r"invalid block access list|block access list mismatch"
         ),

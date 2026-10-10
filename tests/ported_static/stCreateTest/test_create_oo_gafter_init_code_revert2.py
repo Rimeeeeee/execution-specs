@@ -18,10 +18,11 @@ from execution_testing import (
     compute_create_address,
 )
 from execution_testing.forks import Fork
-from execution_testing.specs.static_state.expect_section import (
+from execution_testing.vm import Op
+
+from tests.ported_static.post_state_resolution import (
     resolve_expect_post,
 )
-from execution_testing.vm import Op
 
 REFERENCE_SPEC_GIT_PATH = "N/A"
 REFERENCE_SPEC_VERSION = "N/A"
@@ -186,13 +187,11 @@ def test_create_oo_gafter_init_code_revert2(
         Hash(contract_1, left_padding=True),
         Hash(contract_2, left_padding=True),
     ]
-    tx_gas = [175000]
 
     tx = Transaction(
         sender=sender,
         to=contract_0,
         data=tx_data[d],
-        gas_limit=tx_gas[g],
         error=_exc,
     )
 

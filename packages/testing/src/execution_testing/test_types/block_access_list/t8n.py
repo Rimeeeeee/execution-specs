@@ -1,11 +1,11 @@
 """Block Access List (BAL) for t8n tool communication and fixtures."""
 
 from functools import cached_property
-from typing import Any, Callable, List, Sequence, Union
+from typing import Any, Callable, List, Self, Sequence, Union
 
 import ethereum_rlp as eth_rlp
 from ethereum_rlp import Simple
-from pydantic import Field
+from pydantic import Field, PrivateAttr, validate_call
 
 from execution_testing.base_types import (
     Address,
@@ -81,7 +81,7 @@ class BlockAccessList(EthereumTestRootModel[List[BalAccountChange]]):
     """
     Block Access List for t8n tool communication and fixtures.
 
-    This model represents the BAL exactly as defined in EIP-7928
+    This model represents the BAL as defined in EIP-7928 and EIP-8268
     - it is itself a list of account changes (root model), not a container.
 
     Used for:
@@ -99,6 +99,8 @@ class BlockAccessList(EthereumTestRootModel[List[BalAccountChange]]):
 
     root: List[BalAccountChange] = Field(default_factory=list)
 
+    _rlp_override: Bytes | None = PrivateAttr(default=None)
+
     @classmethod
     def from_rlp(cls, data: Bytes) -> "BlockAccessList":
         """
@@ -110,6 +112,8 @@ class BlockAccessList(EthereumTestRootModel[List[BalAccountChange]]):
            balance_changes, nonce_changes, code_changes],
           ...
         ]
+
+        EIP-8268 adds a trailing storage root to entries with state changes.
         """
         decoded = _seq_from_rlp(eth_rlp.decode(data))
         accounts = []
@@ -149,18 +153,43 @@ class BlockAccessList(EthereumTestRootModel[List[BalAccountChange]]):
                         "new_code",
                         value_fn=lambda v: Bytes(_bytes_from_rlp(v)),
                     ),
+                    storage_root=(
+                        Bytes(_bytes_from_rlp(fields[6]))
+                        if len(fields) > 6
+                        else None
+                    ),
                 )
             )
 
         return cls(root=accounts)
 
     def to_list(self) -> List[Any]:
-        """Return the list for RLP encoding per EIP-7928."""
+        """Return the list for RLP encoding, including any storage roots."""
         return to_serializable_element(self.root)
+
+    @validate_call
+    def with_rlp_override(self, rlp: Bytes) -> Self:
+        """
+        Return a BAL with the same contents whose serialization is ``rlp``,
+        mirroring ``RLPSerializable.rlp_override``.
+
+        A fresh instance is built rather than a copy so that no cached
+        canonical encoding is carried over.
+        """
+        new_instance = type(self)(root=self.root)
+        new_instance._rlp_override = rlp
+        return new_instance
+
+    @property
+    def has_rlp_override(self) -> bool:
+        """Return whether ``rlp`` is an override rather than the encoding."""
+        return self._rlp_override is not None
 
     @cached_property
     def rlp(self) -> Bytes:
         """Return the RLP encoded block access list for hash verification."""
+        if self._rlp_override is not None:
+            return self._rlp_override
         return Bytes(eth_rlp.encode(self.to_list()))
 
     @cached_property

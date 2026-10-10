@@ -11,29 +11,26 @@ Introduction
 Implementation of pre-compiles in G2 (curve over base prime field).
 """
 
-from ethereum_types.numeric import U256, Uint
-from py_ecc.bls.hash_to_curve import clear_cofactor_G2, map_to_curve_G2
-from py_ecc.optimized_bls12_381.optimized_curve import FQ2
-from py_ecc.optimized_bls12_381.optimized_curve import add as bls12_add
-from py_ecc.optimized_bls12_381.optimized_curve import (
-    multiply as bls12_multiply,
+from ethereum_types.numeric import Uint
+
+from ethereum.crypto.bls12_381 import (
+    InvalidInputError,
+    g2_add,
+    g2_msm,
+    map_fp2_to_g2,
 )
 
+from ....fork_types import ExecutionGas
 from ....vm import Evm
-from ....vm.gas import (
-    GasCosts,
-    charge_gas,
-)
-from ....vm.memory import buffer_read
+from ....vm.gas import GasCosts, charge_gas
 from ...exceptions import InvalidParameter
 from . import (
     G2_K_DISCOUNT,
     G2_MAX_DISCOUNT,
     MULTIPLIER,
-    bytes_to_fq2,
-    bytes_to_g2,
-    decode_g2_scalar_pair,
-    g2_to_bytes,
+    pad_g2,
+    unpad_fp,
+    unpad_g2,
 )
 
 LENGTH_PER_PAIR = 288
@@ -54,7 +51,7 @@ def bls12_g2_add(evm: Evm) -> None:
         If the input length is invalid.
 
     """
-    data = evm.message.data
+    data = evm.call_data
     if len(data) != 512:
         raise InvalidParameter("Invalid Input Length")
 
@@ -62,12 +59,15 @@ def bls12_g2_add(evm: Evm) -> None:
     charge_gas(evm, GasCosts.PRECOMPILE_BLS_G2ADD)
 
     # OPERATION
-    p1 = bytes_to_g2(buffer_read(data, U256(0), U256(256)))
-    p2 = bytes_to_g2(buffer_read(data, U256(256), U256(256)))
+    p1 = unpad_g2(data[:256])
+    p2 = unpad_g2(data[256:512])
 
-    result = bls12_add(p1, p2)
+    try:
+        raw = g2_add(p1, p2)
+    except InvalidInputError as e:
+        raise InvalidParameter(str(e)) from e
 
-    evm.output = g2_to_bytes(result)
+    evm.output = pad_g2(raw)
 
 
 def bls12_g2_msm(evm: Evm) -> None:
@@ -89,7 +89,7 @@ def bls12_g2_msm(evm: Evm) -> None:
         If the input length is invalid.
 
     """
-    data = evm.message.data
+    data = evm.call_data
     if len(data) == 0 or len(data) % LENGTH_PER_PAIR != 0:
         raise InvalidParameter("Invalid Input Length")
 
@@ -100,23 +100,25 @@ def bls12_g2_msm(evm: Evm) -> None:
     else:
         discount = Uint(G2_MAX_DISCOUNT)
 
-    gas_cost = Uint(k) * GasCosts.PRECOMPILE_BLS_G2MUL * discount // MULTIPLIER
+    gas_cost = ExecutionGas(
+        Uint(k) * GasCosts.PRECOMPILE_BLS_G2MUL * discount // MULTIPLIER
+    )
     charge_gas(evm, gas_cost)
 
     # OPERATION
+    points = []
+    scalars = []
     for i in range(k):
-        start_index = i * LENGTH_PER_PAIR
-        end_index = start_index + LENGTH_PER_PAIR
+        start = i * LENGTH_PER_PAIR
+        points.append(unpad_g2(data[start : start + 256]))
+        scalars.append(data[start + 256 : start + LENGTH_PER_PAIR])
 
-        p, m = decode_g2_scalar_pair(data[start_index:end_index])
-        product = bls12_multiply(p, m)
+    try:
+        raw = g2_msm(points, scalars)
+    except InvalidInputError as e:
+        raise InvalidParameter(str(e)) from e
 
-        if i == 0:
-            result = product
-        else:
-            result = bls12_add(result, product)
-
-    evm.output = g2_to_bytes(result)
+    evm.output = pad_g2(raw)
 
 
 def bls12_map_fp2_to_g2(evm: Evm) -> None:
@@ -134,7 +136,7 @@ def bls12_map_fp2_to_g2(evm: Evm) -> None:
         If the input length is invalid.
 
     """
-    data = evm.message.data
+    data = evm.call_data
     if len(data) != 128:
         raise InvalidParameter("Invalid Input Length")
 
@@ -142,10 +144,11 @@ def bls12_map_fp2_to_g2(evm: Evm) -> None:
     charge_gas(evm, GasCosts.PRECOMPILE_BLS_G2MAP)
 
     # OPERATION
-    field_element = bytes_to_fq2(data)
-    assert isinstance(field_element, FQ2)
+    fp2 = unpad_fp(data[:64]) + unpad_fp(data[64:])
 
-    fp2 = bytes_to_fq2(data)
-    g2_3d = clear_cofactor_G2(map_to_curve_G2(fp2))
+    try:
+        raw = map_fp2_to_g2(fp2)
+    except InvalidInputError as e:
+        raise InvalidParameter(str(e)) from e
 
-    evm.output = g2_to_bytes(g2_3d)
+    evm.output = pad_g2(raw)
